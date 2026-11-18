@@ -37,9 +37,10 @@
 1. **使用本机已有 CLI 配置（默认 `default`）**：输入 `dreamina-canvas` 的 profile 名称（留空默认 `default`），插件通过 `auth status` 与 `auth account` 校验登录态。
 2. **即梦浏览器登录**：可选填写 profile 名称（默认 `default`），插件调用 `auth login` 返回设备授权链接，并在后台通过 `auth wait --device-code` 等待授权完成。
 
-## 积分保护与防误扣费
+## 额度展示与积分防误扣费
 
-每次生成都会先保存画布节点并调用 `node quote` 询价，校验通过后才在内存中持有短期 `creditConfirmationToken` 调用 `node confirm` 与 `node run`（令牌与临时下载链接绝不落盘、不写入日志）。
+- **账号卡片额度展示**：Magpie 账号页与 `magpie quota` 会直接显示 **会员状态**（是否 VIP 及对应等级，来自 `auth account`）与 **点数（积分）统计**（今日已用点数、累计预扣点数、最近一次 `node quote` 报价与当前上限保护状态；注：`dreamina-canvas` CLI 暂不直接提供账户剩余总点数余额接口）。
+- **每次生成先询价**：先保存画布节点并调用 `node quote` 询价，校验通过后才在内存中持有短期 `creditConfirmationToken` 调用 `node confirm` 与 `node run`（令牌与临时下载链接绝不落盘、不写入日志）。
 
 可在 Magpie Provider 设置中切换以下开关：
 

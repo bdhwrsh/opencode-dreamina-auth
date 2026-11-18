@@ -863,13 +863,81 @@ describe("index.mjs auth methods, refresh, usage, and provider.models", () => {
 
     // Usage
     const u = await hooks.auth.usage(async () => r1)
-    expect(u.plan).toBe("VIP (pro)")
+    expect(u.plan).toBe("VIP · 专业会员 (pro)")
     expect(u.signIn).toBe("kept")
     expect(u.until).toBe("2026-12-31T00:00:00Z")
+    expect(u.windows).toEqual([
+      { name: "会员状态", display: "已开通 · 专业会员 (pro)", aside: true },
+      { name: "点数 (积分)", display: "今日已用 0 点 · 单次上限 200 点（按次报价扣点）", aside: true },
+    ])
 
     // Provider models
     const models = await hooks.provider.models({}, { auth: r1 })
     expect(models["seedream_5.5"].capabilities.output.image).toBe(true)
     expect(models["seedance_2.5"].capabilities.output.video).toBe(true)
+  })
+
+  it("displays maestro VIP status and updated credit quotes/spends in auth.usage after generation", async () => {
+    const imgBytes = Buffer.from("fake-png-bytes")
+    setCliRunnerForTests(async (profile, args) => {
+      const cmd = args.slice(0, 2).join(" ")
+      if (cmd === "auth status") {
+        return { ok: true, data: { loggedIn: true, expiresAt: "2026-12-31T00:00:00Z", region: "cn", profile } }
+      }
+      if (cmd === "auth account") {
+        return { ok: true, data: { userId: 987654, isVip: true, vipLevel: "maestro" } }
+      }
+      if (cmd === "model list") return { exitCode: 1, stdout: "", stderr: "" }
+      if (cmd === "canvas create") {
+        const pid = args[args.indexOf("--project-id") + 1]
+        return { ok: true, data: { project: { projectId: pid, name: "Magpie Gateway" } } }
+      }
+      if (cmd === "node create") {
+        return { ok: true, data: { node: { nodeId: args[args.indexOf("--node-id") + 1] } } }
+      }
+      if (cmd === "node quote") {
+        const nid = args[args.indexOf("--node-id") + 1]
+        return { ok: true, data: { items: [{ nodeId: nid, maxCredits: 15 }], totalMaxCredits: 15 } }
+      }
+      if (cmd === "node confirm") {
+        return { ok: true, data: { creditConfirmationToken: SECRET_TOKEN, creditCeiling: 15 } }
+      }
+      if (cmd === "node run") {
+        return {
+          ok: true,
+          data: { items: [{ nodeId: args[args.indexOf("--node-id") + 1], submitId: args[args.indexOf("--submit-id") + 1], state: "accepted" }] },
+        }
+      }
+      if (cmd === "operation wait") {
+        return { ok: true, data: { state: "succeeded", resources: [{ resourceId: "res-img-1", state: "succeeded" }] } }
+      }
+      if (cmd === "resource get") {
+        return { ok: true, data: { resourceId: "res-img-1", type: "image", status: "succeeded", creditsAmount: 12 } }
+      }
+      if (cmd === "resource download") {
+        const target = path.join(args[args.indexOf("--output") + 1], "out.png")
+        fs.writeFileSync(target, imgBytes)
+        return { ok: true, data: { resourceId: "res-img-1", path: target, size: imgBytes.length } }
+      }
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`)
+    })
+
+    const hooks = await DreaminaAuthPlugin({ directory: tmpDir })
+    const authObj = { type: "oauth", metadata: { profile: "default" } }
+    const loaded = await hooks.auth.loader(async () => authObj)
+
+    const genRes = await loaded.fetch("dreamina://local/images/generations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "seedream_5.5", prompt: "sunset mountain" }),
+    })
+    expect(genRes.status).toBe(200)
+
+    const u = await hooks.auth.usage(async () => authObj)
+    expect(u.plan).toBe("VIP · 大师会员 (maestro)")
+    expect(u.windows).toEqual([
+      { name: "会员状态", display: "已开通 · 大师会员 (maestro)", aside: true },
+      { name: "点数 (积分)", display: "今日已用 12 点 · 累计 12 点 · 最近报价 15 点（单次上限 200 点）", aside: true },
+    ])
   })
 })

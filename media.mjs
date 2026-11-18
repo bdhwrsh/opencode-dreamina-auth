@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { ensureCanvas, getVideoTask, newNodeId, saveVideoTask } from "./canvas-state.mjs"
+import { ensureCanvas, getVideoTask, newNodeId, recordCreditQuote, recordCreditSpend, saveVideoTask } from "./canvas-state.mjs"
 import { CliError, hasCliRunnerForTests, isAbortError, isCliInstalled, redactSensitiveText, runCli } from "./cli.mjs"
 import { ModelParamError, fetchLiveModels, resolveImageParams, resolveVideoParams } from "./models.mjs"
 
@@ -464,7 +464,7 @@ function findDownloadedFile(tmpDir, dlData) {
   })
 }
 
-async function quoteConfirmAndRun(profile, projectId, nodeId, policy, { signal }) {
+async function quoteConfirmAndRun(profile, projectId, nodeId, policy, { signal, directory }) {
   const quoteRes = await runCli(
     profile,
     ["node", "quote", "--project-id", projectId, "--node-id", nodeId],
@@ -490,6 +490,7 @@ async function quoteConfirmAndRun(profile, projectId, nodeId, policy, { signal }
     })
   }
   const quotedCredits = Number(totalMaxCredits)
+  await recordCreditQuote(profile, { quotedCredits, directory }).catch(() => {})
 
   if (policy.quoteOnly) {
     return {
@@ -615,7 +616,7 @@ async function handleImageRequest(req, { profile, directory, getOption, signal, 
 
   await runCli(profile, createArgs, { signal })
 
-  const exec = await quoteConfirmAndRun(profile, projectId, nodeId, policy, { signal })
+  const exec = await quoteConfirmAndRun(profile, projectId, nodeId, policy, { signal, directory })
   if (exec.blockedResponse) return exec.blockedResponse
 
   const waitRes = await runCli(
@@ -647,6 +648,25 @@ async function handleImageRequest(req, { profile, directory, getOption, signal, 
       code: "empty_output",
     })
   }
+
+  let spentCredits = exec.quotedCredits
+  const inlineCredits = okResources.find((r) => Number.isFinite(Number(r?.creditsAmount)))?.creditsAmount
+  if (inlineCredits !== undefined && Number(inlineCredits) >= 0) {
+    spentCredits = Number(inlineCredits)
+  } else {
+    try {
+      const rgRes = await runCli(
+        profile,
+        ["resource", "get", okResources[0].resourceId, "--project-id", projectId],
+        { signal, timeoutMs: 10_000, check: false },
+      )
+      const rgCredits = rgRes?.ok ? rgRes.data?.creditsAmount : undefined
+      if (rgCredits !== undefined && Number.isFinite(Number(rgCredits)) && Number(rgCredits) >= 0) {
+        spentCredits = Number(rgCredits)
+      }
+    } catch {}
+  }
+  await recordCreditSpend(profile, { credits: spentCredits, directory }).catch(() => {})
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dreamina-img-"))
   try {
@@ -716,7 +736,7 @@ async function handleVideoCreate(req, { profile, directory, getOption, signal })
 
   await runCli(profile, createArgs, { signal })
 
-  const exec = await quoteConfirmAndRun(profile, projectId, nodeId, policy, { signal })
+  const exec = await quoteConfirmAndRun(profile, projectId, nodeId, policy, { signal, directory })
   if (exec.blockedResponse) return exec.blockedResponse
 
   const createdAt = Date.now()
@@ -732,6 +752,7 @@ async function handleVideoCreate(req, { profile, directory, getOption, signal })
     createdAt,
     size,
   })
+  await recordCreditSpend(profile, { credits: exec.quotedCredits, directory }).catch(() => {})
 
   return jsonResponse(200, {
     id: videoTaskId,

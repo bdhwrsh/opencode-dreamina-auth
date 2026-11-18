@@ -22,7 +22,25 @@ export function newNodeId() {
 }
 
 function defaultState() {
-  return { version: 1, canvases: {}, videos: {} }
+  return { version: 1, canvases: {}, videos: {}, credits: {} }
+}
+
+function localDateKey(d = new Date()) {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, "0")
+  const day = String(d.getDate()).padStart(2, "0")
+  return `${y}-${m}-${day}`
+}
+
+function finiteNonNeg(val, fallback = 0) {
+  const n = Number(val)
+  return Number.isFinite(n) && n >= 0 ? n : fallback
+}
+
+function nullableNonNeg(val) {
+  if (val === null || val === undefined) return null
+  const n = Number(val)
+  return Number.isFinite(n) && n >= 0 ? n : null
 }
 
 function normalizeState(raw) {
@@ -53,6 +71,23 @@ function normalizeState(raw) {
           duration: Number.isFinite(v.duration) ? v.duration : 5,
           createdAt: Number.isFinite(v.createdAt) ? v.createdAt : Date.now(),
           ...(typeof v.size === "string" && v.size ? { size: v.size } : {}),
+        }
+      }
+    }
+  }
+  if (raw.credits && typeof raw.credits === "object" && !Array.isArray(raw.credits)) {
+    for (const [k, v] of Object.entries(raw.credits)) {
+      if (!k || k === "__proto__" || k === "constructor" || k === "prototype") continue
+      if (v && typeof v === "object") {
+        state.credits[k] = {
+          todayDate: typeof v.todayDate === "string" ? v.todayDate : "",
+          todayCredits: finiteNonNeg(v.todayCredits, 0),
+          totalCredits: finiteNonNeg(v.totalCredits, 0),
+          lastQuotedCredits: nullableNonNeg(v.lastQuotedCredits),
+          lastQuotedAt: nullableNonNeg(v.lastQuotedAt),
+          lastSpentCredits: nullableNonNeg(v.lastSpentCredits),
+          lastRunAt: nullableNonNeg(v.lastRunAt),
+          runCount: Math.trunc(finiteNonNeg(v.runCount, 0)),
         }
       }
     }
@@ -231,4 +266,78 @@ export function getVideoTask(directory, videoTaskId) {
     }
   }
   return null
+}
+
+function emptyCreditRecord(todayKey = localDateKey()) {
+  return {
+    todayDate: todayKey,
+    todayCredits: 0,
+    totalCredits: 0,
+    lastQuotedCredits: null,
+    lastQuotedAt: null,
+    lastSpentCredits: null,
+    lastRunAt: null,
+    runCount: 0,
+  }
+}
+
+export async function recordCreditQuote(profile = "default", { quotedCredits, directory } = {}) {
+  const safeProfile = String(profile ?? "").trim() || "default"
+  const val = Number(quotedCredits)
+  if (!Number.isFinite(val) || val < 0) return
+  await mutateCanvasState(directory, (state) => {
+    const todayKey = localDateKey()
+    const prev = Object.hasOwn(state.credits, safeProfile) ? state.credits[safeProfile] : emptyCreditRecord(todayKey)
+    const todayCredits = prev.todayDate === todayKey ? finiteNonNeg(prev.todayCredits, 0) : 0
+    state.credits[safeProfile] = {
+      ...prev,
+      todayDate: todayKey,
+      todayCredits,
+      lastQuotedCredits: val,
+      lastQuotedAt: Date.now(),
+    }
+  })
+}
+
+export async function recordCreditSpend(profile = "default", { credits, directory } = {}) {
+  const safeProfile = String(profile ?? "").trim() || "default"
+  const val = Number(credits)
+  if (!Number.isFinite(val) || val < 0) return
+  await mutateCanvasState(directory, (state) => {
+    const todayKey = localDateKey()
+    const prev = Object.hasOwn(state.credits, safeProfile) ? state.credits[safeProfile] : emptyCreditRecord(todayKey)
+    const prevToday = prev.todayDate === todayKey ? finiteNonNeg(prev.todayCredits, 0) : 0
+    state.credits[safeProfile] = {
+      ...prev,
+      todayDate: todayKey,
+      todayCredits: prevToday + val,
+      totalCredits: finiteNonNeg(prev.totalCredits, 0) + val,
+      lastSpentCredits: val,
+      lastRunAt: Date.now(),
+      runCount: Math.trunc(finiteNonNeg(prev.runCount, 0)) + 1,
+    }
+  })
+}
+
+export async function getCreditStats(profile = "default", { directory } = {}) {
+  const safeProfile = String(profile ?? "").trim() || "default"
+  const state = readCanvasState(directory)
+  const rec = Object.hasOwn(state.credits, safeProfile) ? state.credits[safeProfile] : null
+  if (!rec) {
+    return {
+      todayCredits: 0,
+      totalCredits: 0,
+      lastQuotedCredits: null,
+      lastSpentCredits: null,
+      runCount: 0,
+    }
+  }
+  const todayKey = localDateKey()
+  return {
+    todayCredits: rec.todayDate === todayKey ? finiteNonNeg(rec.todayCredits, 0) : 0,
+    totalCredits: finiteNonNeg(rec.totalCredits, 0),
+    lastQuotedCredits: nullableNonNeg(rec.lastQuotedCredits),
+    lastSpentCredits: nullableNonNeg(rec.lastSpentCredits),
+    runCount: Math.trunc(finiteNonNeg(rec.runCount, 0)),
+  }
 }

@@ -1,11 +1,49 @@
+import { getCreditStats } from "./canvas-state.mjs"
 import { hasCliRunnerForTests, isCliInstalled, runCli } from "./cli.mjs"
-import { createMediaFetch } from "./media.mjs"
+import { DEFAULT_CREDIT_CEILING, createMediaFetch } from "./media.mjs"
 import { BASE_URL, LIVE_META, NPM_IMAGE, configModels, fetchLiveModels, openCodeModelOf } from "./models.mjs"
 
 const PROVIDER_ID = "dreamina"
 const PROVIDER_NAME = "Dreamina (即梦)"
 const DEFAULT_PROFILE = "default"
 const PROFILE_PATTERN = /^[A-Za-z0-9._-]{1,64}$/
+
+const VIP_LEVEL_LABELS = {
+  maestro: "大师会员 (maestro)",
+  advanced: "高级会员 (advanced)",
+  pro: "专业会员 (pro)",
+  standard: "标准会员 (standard)",
+  basic: "基础会员 (basic)",
+}
+
+function formatVipStatus(acct) {
+  const isVip = Boolean(acct?.isVip)
+  const rawLevel = typeof acct?.vipLevel === "string" ? acct.vipLevel.trim() : ""
+  const lower = rawLevel.toLowerCase()
+  const tierLabel = rawLevel ? (VIP_LEVEL_LABELS[lower] ?? `VIP (${rawLevel})`) : ""
+  if (!isVip) {
+    return {
+      plan: "普通用户 (非会员)",
+      membershipDisplay: "未开通 (普通用户)",
+    }
+  }
+  return {
+    plan: tierLabel ? `VIP · ${tierLabel}` : "VIP 会员",
+    membershipDisplay: tierLabel ? `已开通 · ${tierLabel}` : "已开通 · VIP 会员",
+  }
+}
+
+function resolveActiveGuardLabel(magpie) {
+  const quoteOnly = typeof magpie?.option === "function" && magpie.option(PROVIDER_ID, "quote_only") === true
+  if (quoteOnly) return "仅报价预演（不扣点）"
+  const guardRaw = typeof magpie?.option === "function" ? magpie.option(PROVIDER_ID, "credit_guard") : undefined
+  const guardEnabled = guardRaw === undefined ? true : Boolean(guardRaw)
+  if (!guardEnabled) return "无上限保护"
+  const envRaw = process.env.DREAMINA_CREDIT_CEILING
+  const envVal = envRaw !== undefined && envRaw !== "" ? Number(envRaw) : NaN
+  const ceiling = Number.isInteger(envVal) && envVal >= 0 ? envVal : DEFAULT_CREDIT_CEILING
+  return `单次上限 ${ceiling} 点`
+}
 
 function normalizeProfile(raw) {
   const s = String(raw ?? "").trim()
@@ -360,14 +398,42 @@ export const DreaminaAuthPlugin = async (input = {}) => {
           timeoutMs: 15_000,
           check: false,
         })
-        const acct = accountRes?.ok ? accountRes.data : null
-        const plan = acct?.isVip ? (acct.vipLevel ? `VIP (${acct.vipLevel})` : "VIP") : "Free / Standard"
+        const acct = accountRes?.ok
+          ? accountRes.data
+          : auth?.metadata && ("isVip" in auth.metadata || "vipLevel" in auth.metadata)
+            ? { isVip: Boolean(auth.metadata.isVip), vipLevel: auth.metadata.vipLevel || "" }
+            : null
+        const { plan, membershipDisplay } = formatVipStatus(acct)
         const user = acct?.userId != null ? `${profile} (${acct.userId})` : profile
+        const stats = await getCreditStats(profile, { directory }).catch(() => ({
+          todayCredits: 0,
+          totalCredits: 0,
+          lastQuotedCredits: null,
+          lastSpentCredits: null,
+          runCount: 0,
+        }))
+        const guardLabel = resolveActiveGuardLabel(magpie)
+        const hasHistory = stats.totalCredits > 0 || stats.lastQuotedCredits !== null
+        const quoteSuffix = stats.lastQuotedCredits !== null ? ` · 最近报价 ${stats.lastQuotedCredits} 点` : ""
+        const creditsDisplay = hasHistory
+          ? `今日已用 ${stats.todayCredits} 点 · 累计 ${stats.totalCredits} 点${quoteSuffix}（${guardLabel}）`
+          : `今日已用 0 点 · ${guardLabel}（按次报价扣点）`
         return {
           plan,
           user,
           ...(statusRes.data.expiresAt ? { until: statusRes.data.expiresAt } : {}),
-          windows: [],
+          windows: [
+            {
+              name: "会员状态",
+              display: membershipDisplay,
+              aside: true,
+            },
+            {
+              name: "点数 (积分)",
+              display: creditsDisplay,
+              aside: true,
+            },
+          ],
           signIn: "kept",
         }
       },
