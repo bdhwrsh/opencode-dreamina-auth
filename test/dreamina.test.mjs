@@ -8,7 +8,7 @@ import * as opencodeEntry from "../opencode.mjs"
 import opencode2Default from "../opencode2.mjs"
 import { DreaminaAuthPlugin } from "../index.mjs"
 import { CliError, isCliInstalled, redactSensitiveText, resolveCliBin, runCli, setCliRunnerForTests } from "../cli.mjs"
-import { ensureCanvas, getVideoTask, readCanvasState, resolveStatePath, saveVideoTask } from "../canvas-state.mjs"
+import { ensureCanvas, getCreditStats, getVideoTask, readCanvasState, recordCreditSpend, resolveStatePath, saveVideoTask, setCreditBalance } from "../canvas-state.mjs"
 import {
   LIVE_META,
   clearLiveModelCache,
@@ -60,6 +60,7 @@ describe("Dreamina plugin packaging & entry points", () => {
     expect(pkg.exports).toEqual({ "./server": "./magpie.mjs", ".": "./opencode2.mjs" })
     expect(pkg.scripts).toEqual({ test: "bun test" })
     expect(pkg.magpie?.name).toBe("Dreamina (即梦)")
+    expect(pkg.magpie?.icon).toMatch(/^data:image\/png;base64,/)
     expect(pkg.magpie?.maxConcurrency).toBe(4)
     expect(pkg.dependencies).toBeUndefined()
   })
@@ -350,6 +351,32 @@ describe("canvas-state.mjs", () => {
     const state = readCanvasState(tmpDir)
     expect(state.canvases.default.projectId).toBe(p1)
     expect(getVideoTask(tmpDir, "video_test_1")?.duration).toBe(6)
+  })
+
+  it("tracks configured credit balance, spentSinceBalanceSet, and remainingCredits cleanly", async () => {
+    const empty = await getCreditStats("default", { directory: tmpDir })
+    expect(empty.configuredBalance).toBeNull()
+    expect(empty.spentSinceBalanceSet).toBe(0)
+    expect(empty.remainingCredits).toBeNull()
+
+    await setCreditBalance("default", { balance: "", directory: tmpDir })
+    await setCreditBalance("default", { balance: null, directory: tmpDir })
+    await setCreditBalance("default", { balance: -5, directory: tmpDir })
+    expect((await getCreditStats("default", { directory: tmpDir })).configuredBalance).toBeNull()
+
+    await recordCreditSpend("default", { credits: 20, directory: tmpDir })
+    await setCreditBalance("default", { balance: 1000, directory: tmpDir })
+    await recordCreditSpend("default", { credits: 12, directory: tmpDir })
+
+    const stats = await getCreditStats("default", { directory: tmpDir })
+    expect(stats.todayCredits).toBe(32)
+    expect(stats.totalCredits).toBe(32)
+    expect(stats.configuredBalance).toBe(1000)
+    expect(stats.spentSinceBalanceSet).toBe(12)
+    expect(stats.remainingCredits).toBe(988)
+
+    await recordCreditSpend("default", { credits: 2000, directory: tmpDir })
+    expect((await getCreditStats("default", { directory: tmpDir })).remainingCredits).toBe(0)
   })
 })
 
@@ -820,12 +847,41 @@ describe("index.mjs auth methods, refresh, usage, and provider.models", () => {
       throw new Error(`Unexpected auth test CLI call: ${args.join(" ")}`)
     })
 
+    const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"))
     const hooks = await DreaminaAuthPlugin({ directory: tmpDir })
     expect(hooks.auth.provider).toBe("dreamina")
-    expect(hooks.auth.options.map((o) => [o.key, o.default])).toEqual([
-      ["quote_only", false],
-      ["credit_guard", true],
+    expect(hooks.auth.icon).toMatch(/^data:image\/png;base64,/)
+    expect(hooks.auth.icon).toBe(pkg.magpie.icon)
+    expect(hooks.auth.options).toEqual([
+      {
+        key: "quote_only",
+        label: "Quote only",
+        labels: { zh: "仅报价（不扣积分）", "zh-TW": "僅報價（不扣積分）" },
+        description: "Quote credits only without running generation.",
+        descriptions: {
+          zh: "只询价并返回预估点数，不执行生成",
+          "zh-TW": "只詢價並回傳預估點數，不執行生成",
+        },
+        default: false,
+        placement: "top",
+      },
+      {
+        key: "credit_guard",
+        label: "200-credit ceiling",
+        labels: { zh: "单次 200 点上限保护", "zh-TW": "單次 200 點上限保護" },
+        description: "Block runs quoted above 200 credits.",
+        descriptions: {
+          zh: "单次报价超过 200 点时自动拦截",
+          "zh-TW": "單次報價超過 200 點時自動攔截",
+        },
+        default: true,
+        placement: "top",
+      },
     ])
+    expect(hooks.auth.methods[0].prompts.map((p) => p.key)).toEqual(["profile", "credits"])
+    expect(hooks.auth.methods[0].prompts[1].validate("")).toBeNull()
+    expect(hooks.auth.methods[0].prompts[1].validate("1000")).toBeNull()
+    expect(hooks.auth.methods[0].prompts[1].validate("-1")).toBeTruthy()
 
     const cfg = { provider: {} }
     await hooks.config(cfg)
@@ -861,14 +917,13 @@ describe("index.mjs auth methods, refresh, usage, and provider.models", () => {
       expect(err.signIn).toBe("expired")
     }
 
-    // Usage
+    // Usage (no balance set -> concise plan, no OAuth until, single 今日点数 window)
     const u = await hooks.auth.usage(async () => r1)
-    expect(u.plan).toBe("VIP · 专业会员 (pro)")
+    expect(u.plan).toBe("VIP · 专业会员")
     expect(u.signIn).toBe("kept")
-    expect(u.until).toBe("2026-12-31T00:00:00Z")
+    expect(u.until).toBeUndefined()
     expect(u.windows).toEqual([
-      { name: "会员状态", display: "已开通 · 专业会员 (pro)", aside: true },
-      { name: "点数 (积分)", display: "今日已用 0 点 · 单次上限 200 点（按次报价扣点）", aside: true },
+      { name: "今日点数", display: "已用 0 点 · 单次上限 200 点", aside: true },
     ])
 
     // Provider models
@@ -934,10 +989,124 @@ describe("index.mjs auth methods, refresh, usage, and provider.models", () => {
     expect(genRes.status).toBe(200)
 
     const u = await hooks.auth.usage(async () => authObj)
-    expect(u.plan).toBe("VIP · 大师会员 (maestro)")
+    expect(u.plan).toBe("VIP · 大师会员")
+    expect(u.until).toBeUndefined()
     expect(u.windows).toEqual([
-      { name: "会员状态", display: "已开通 · 大师会员 (maestro)", aside: true },
-      { name: "点数 (积分)", display: "今日已用 12 点 · 累计 12 点 · 最近报价 15 点（单次上限 200 点）", aside: true },
+      { name: "今日点数", display: "已用 12 点 · 累计 12 点（单次上限 200 点）", aside: true },
     ])
+  })
+
+  it("tracks sign-in initial credits, generation deduction, DREAMINA_CREDITS_BALANCE, and liveBalance auto-detection", async () => {
+    const imgBytes = Buffer.from("fake-png-bytes")
+    let accountPayload = { userId: 987654, isVip: true, vipLevel: "maestro" }
+    setCliRunnerForTests(async (profile, args) => {
+      const cmd = args.slice(0, 2).join(" ")
+      if (cmd === "auth status") {
+        return { ok: true, data: { loggedIn: true, expiresAt: "2026-12-31T00:00:00Z", region: "cn", profile } }
+      }
+      if (cmd === "auth account") {
+        return { ok: true, data: accountPayload }
+      }
+      if (cmd === "model list") return { exitCode: 1, stdout: "", stderr: "" }
+      if (cmd === "canvas create") {
+        const pid = args[args.indexOf("--project-id") + 1]
+        return { ok: true, data: { project: { projectId: pid, name: "Magpie Gateway" } } }
+      }
+      if (cmd === "node create") {
+        return { ok: true, data: { node: { nodeId: args[args.indexOf("--node-id") + 1] } } }
+      }
+      if (cmd === "node quote") {
+        const nid = args[args.indexOf("--node-id") + 1]
+        return { ok: true, data: { items: [{ nodeId: nid, maxCredits: 15 }], totalMaxCredits: 15 } }
+      }
+      if (cmd === "node confirm") {
+        return { ok: true, data: { creditConfirmationToken: SECRET_TOKEN, creditCeiling: 15 } }
+      }
+      if (cmd === "node run") {
+        return {
+          ok: true,
+          data: { items: [{ nodeId: args[args.indexOf("--node-id") + 1], submitId: args[args.indexOf("--submit-id") + 1], state: "accepted" }] },
+        }
+      }
+      if (cmd === "operation wait") {
+        return { ok: true, data: { state: "succeeded", resources: [{ resourceId: "res-img-1", state: "succeeded" }] } }
+      }
+      if (cmd === "resource get") {
+        return { ok: true, data: { resourceId: "res-img-1", type: "image", status: "succeeded", creditsAmount: 12 } }
+      }
+      if (cmd === "resource download") {
+        const target = path.join(args[args.indexOf("--output") + 1], "out.png")
+        fs.writeFileSync(target, imgBytes)
+        return { ok: true, data: { resourceId: "res-img-1", path: target, size: imgBytes.length } }
+      }
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`)
+    })
+
+    const hooks = await DreaminaAuthPlugin({ directory: tmpDir })
+    const m = await hooks.auth.methods[0].authorize({ profile: "default", credits: "1000" })
+    const signedIn = await m.callback()
+    expect(signedIn.type).toBe("success")
+
+    const loaded = await hooks.auth.loader(async () => signedIn)
+    const genRes = await loaded.fetch("dreamina://local/images/generations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "seedream_5.5", prompt: "neon harbor" }),
+    })
+    expect(genRes.status).toBe(200)
+
+    const uDeducted = await hooks.auth.usage(async () => signedIn)
+    expect(uDeducted.plan).toBe("VIP · 大师会员")
+    expect(uDeducted.until).toBeUndefined()
+    expect(uDeducted.balance).toBe("剩余 988 点")
+    expect(uDeducted.windows).toEqual([
+      {
+        name: "会员点数",
+        used: 1.2,
+        amount: 12,
+        limit: 1000,
+        unit: "credits",
+        display: "剩余 988 / 1000 点 · 今日已用 12 点",
+        aside: true,
+      },
+    ])
+
+    // Env DREAMINA_CREDITS_BALANCE fallback overrides configuredBalance cleanly
+    const prevEnv = process.env.DREAMINA_CREDITS_BALANCE
+    process.env.DREAMINA_CREDITS_BALANCE = "500"
+    try {
+      const uEnv = await hooks.auth.usage(async () => signedIn)
+      expect(uEnv.balance).toBe("剩余 488 点")
+      expect(uEnv.windows[0]).toEqual({
+        name: "会员点数",
+        used: 2.4,
+        amount: 12,
+        limit: 500,
+        unit: "credits",
+        display: "剩余 488 / 500 点 · 今日已用 12 点",
+        aside: true,
+      })
+    } finally {
+      if (prevEnv === undefined) delete process.env.DREAMINA_CREDITS_BALANCE
+      else process.env.DREAMINA_CREDITS_BALANCE = prevEnv
+    }
+
+    // Live balance from auth account takes precedence over env/configured balance
+    accountPayload = { userId: 987654, isVip: true, vipLevel: "maestro", credits: 650 }
+    const uLive = await hooks.auth.usage(async () => signedIn)
+    expect(uLive.balance).toBe("剩余 650 点")
+    expect(uLive.windows).toEqual([
+      {
+        name: "会员点数",
+        display: "剩余 650 点 · 今日已用 12 点",
+        aside: true,
+      },
+    ])
+
+    // Also supports `balance` alias in auth account
+    accountPayload = { userId: 987654, isVip: false, balance: 420 }
+    const uLiveAlias = await hooks.auth.usage(async () => signedIn)
+    expect(uLiveAlias.plan).toBe("普通用户")
+    expect(uLiveAlias.balance).toBe("剩余 420 点")
   })
 })

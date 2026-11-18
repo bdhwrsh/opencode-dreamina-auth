@@ -39,13 +39,14 @@
 
 ## 额度展示与积分防误扣费
 
-- **账号卡片额度展示**：Magpie 账号页与 `magpie quota` 会直接显示 **会员状态**（是否 VIP 及对应等级，来自 `auth account`）与 **点数（积分）统计**（今日已用点数、累计预扣点数、最近一次 `node quote` 报价与当前上限保护状态；注：`dreamina-canvas` CLI 暂不直接提供账户剩余总点数余额接口）。
+- **Logo 与菜单栏额度展示**：Magpie 供应商列表与菜单栏会展示官方产品 Logo、会员等级（来自 `auth account`）与点数状态。
+- **点数余额与按次扣减**：因为 `dreamina-canvas` CLI 暂不直接返回云端总余额，登录时可选填当前点数余额（或设置环境变量 `DREAMINA_CREDITS_BALANCE`），之后每次生成会自动按次扣减并显示剩余点数进度；留空则显示今日已用与上限保护状态（若 CLI 返回余额字段会自动优先采用）。
 - **每次生成先询价**：先保存画布节点并调用 `node quote` 询价，校验通过后才在内存中持有短期 `creditConfirmationToken` 调用 `node confirm` 与 `node run`（令牌与临时下载链接绝不落盘、不写入日志）。
 
 可在 Magpie Provider 设置中切换以下开关：
 
-- **仅报价 `quote_only`（默认关闭 `false`）**：开启后仅执行 `node quote`，返回 HTTP `403` 与预估 `totalMaxCredits`，绝不触发扣费与生成（单次请求也可在请求体传 `"quote_only": true`）。
-- **积分上限保护 `credit_guard`（默认开启 `true`）**：当 `totalMaxCredits` 超过上限（默认 `200` 积分）时返回 HTTP `403` 并阻止运行；可通过请求体 `credit_ceiling` 或环境变量 `DREAMINA_CREDIT_CEILING` 覆盖上限。
+- **仅报价（不扣积分）`quote_only`（默认关闭 `false`）**：只询价并返回 HTTP `403` 与预估 `totalMaxCredits`，不执行生成（单次请求也可在请求体传 `"quote_only": true`）。
+- **单次 200 点上限保护 `credit_guard`（默认开启 `true`）**：当 `totalMaxCredits` 超过上限（默认 `200` 点）时返回 HTTP `403` 并阻止运行；可通过请求体 `credit_ceiling` 或环境变量 `DREAMINA_CREDIT_CEILING` 覆盖上限。
 
 ## 本地状态与测试
 

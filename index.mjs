@@ -1,36 +1,49 @@
-import { getCreditStats } from "./canvas-state.mjs"
+import { getCreditStats, setCreditBalance } from "./canvas-state.mjs"
 import { hasCliRunnerForTests, isCliInstalled, runCli } from "./cli.mjs"
 import { DEFAULT_CREDIT_CEILING, createMediaFetch } from "./media.mjs"
 import { BASE_URL, LIVE_META, NPM_IMAGE, configModels, fetchLiveModels, openCodeModelOf } from "./models.mjs"
 
 const PROVIDER_ID = "dreamina"
 const PROVIDER_NAME = "Dreamina (即梦)"
+const DREAMINA_ICON =
+  "data:image/png;base64,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"
 const DEFAULT_PROFILE = "default"
 const PROFILE_PATTERN = /^[A-Za-z0-9._-]{1,64}$/
 
 const VIP_LEVEL_LABELS = {
-  maestro: "大师会员 (maestro)",
-  advanced: "高级会员 (advanced)",
-  pro: "专业会员 (pro)",
-  standard: "标准会员 (standard)",
-  basic: "基础会员 (basic)",
+  maestro: "大师会员",
+  advanced: "高级会员",
+  pro: "专业会员",
+  standard: "标准会员",
+  basic: "基础会员",
 }
 
 function formatVipStatus(acct) {
   const isVip = Boolean(acct?.isVip)
+  if (!isVip) return "普通用户"
   const rawLevel = typeof acct?.vipLevel === "string" ? acct.vipLevel.trim() : ""
-  const lower = rawLevel.toLowerCase()
-  const tierLabel = rawLevel ? (VIP_LEVEL_LABELS[lower] ?? `VIP (${rawLevel})`) : ""
-  if (!isVip) {
-    return {
-      plan: "普通用户 (非会员)",
-      membershipDisplay: "未开通 (普通用户)",
-    }
+  if (!rawLevel) return "VIP 会员"
+  const tierLabel = VIP_LEVEL_LABELS[rawLevel.toLowerCase()] ?? rawLevel
+  return `VIP · ${tierLabel}`
+}
+
+function parseNonNegNumber(val) {
+  if (val === null || val === undefined || typeof val === "boolean") return null
+  if (typeof val === "string") {
+    const trimmed = val.trim()
+    if (!trimmed || !/^\d+(?:\.\d+)?$/.test(trimmed)) return null
+    val = Number(trimmed)
   }
-  return {
-    plan: tierLabel ? `VIP · ${tierLabel}` : "VIP 会员",
-    membershipDisplay: tierLabel ? `已开通 · ${tierLabel}` : "已开通 · VIP 会员",
+  return typeof val === "number" && Number.isFinite(val) && val >= 0 ? val : null
+}
+
+function extractLiveBalance(acct) {
+  if (!acct || typeof acct !== "object") return null
+  for (const key of ["credits", "balance", "remainingCredits", "points"]) {
+    const parsed = parseNonNegNumber(acct[key])
+    if (parsed !== null) return parsed
   }
+  return null
 }
 
 function resolveActiveGuardLabel(magpie) {
@@ -105,7 +118,7 @@ function isAuthExpiredResult(res) {
   )
 }
 
-async function finalizeProfileSignIn(profile, { statusData, signal } = {}) {
+async function finalizeProfileSignIn(profile, { statusData, initialCredits, directory, signal } = {}) {
   let finalStatus = statusData
   if (!finalStatus) {
     const statusRes = await runCli(profile, ["auth", "status"], { signal, timeoutMs: 15_000, check: false })
@@ -116,6 +129,11 @@ async function finalizeProfileSignIn(profile, { statusData, signal } = {}) {
       }
     }
     finalStatus = statusRes.data
+  }
+
+  const parsedCredits = parseNonNegNumber(initialCredits)
+  if (parsedCredits !== null) {
+    await setCreditBalance(profile, { balance: parsedCredits, directory })
   }
 
   const accountRes = await runCli(profile, ["auth", "account"], { signal, timeoutMs: 15_000, check: false })
@@ -161,6 +179,25 @@ const PROFILE_PROMPTS = [
       return null
     },
   },
+  {
+    type: "text",
+    key: "credits",
+    message: "Current credit balance (optional, e.g. 1000)",
+    messages: {
+      zh: "当前即梦点数余额（选填，如 1000；填入后自动按次扣减）",
+      "zh-TW": "目前即夢點數餘額（選填，如 1000；填入後自動按次扣減）",
+    },
+    placeholder: "选填，留空则仅统计已用点数",
+    required: false,
+    validate: (value) => {
+      const v = String(value ?? "").trim()
+      if (!v) return null
+      if (!/^\d+(?:\.\d+)?$/.test(v) || Number(v) < 0) {
+        return "Must be a non-negative number"
+      }
+      return null
+    },
+  },
 ]
 
 export const DreaminaAuthPlugin = async (input = {}) => {
@@ -182,6 +219,7 @@ export const DreaminaAuthPlugin = async (input = {}) => {
     },
     auth: {
       provider: PROVIDER_ID,
+      icon: DREAMINA_ICON,
       maxConcurrency: 4,
       cli: {
         name: "Dreamina Canvas CLI (dreamina-canvas)",
@@ -195,24 +233,24 @@ export const DreaminaAuthPlugin = async (input = {}) => {
       options: [
         {
           key: "quote_only",
-          label: "Quote only (dry-run)",
-          labels: { zh: "仅报价（不消耗积分）", "zh-TW": "僅報價（不消耗積分）" },
-          description: "Estimate credit cost via node quote (returns HTTP 403 with totalMaxCredits) without confirming or running generation.",
+          label: "Quote only",
+          labels: { zh: "仅报价（不扣积分）", "zh-TW": "僅報價（不扣積分）" },
+          description: "Quote credits only without running generation.",
           descriptions: {
-            zh: "仅调用 node quote 估算积分并返回提示（HTTP 403），不执行确认扣费与实际生成。",
-            "zh-TW": "僅呼叫 node quote 估算積分並回傳提示（HTTP 403），不執行確認扣費與實際生成。",
+            zh: "只询价并返回预估点数，不执行生成",
+            "zh-TW": "只詢價並回傳預估點數，不執行生成",
           },
           default: false,
           placement: "top",
         },
         {
           key: "credit_guard",
-          label: "Credit ceiling guard (200)",
-          labels: { zh: "积分上限保护（默认 200）", "zh-TW": "積分上限保護（預設 200）" },
-          description: "Block generation when quoted totalMaxCredits exceeds 200 credits (or the request credit_ceiling).",
+          label: "200-credit ceiling",
+          labels: { zh: "单次 200 点上限保护", "zh-TW": "單次 200 點上限保護" },
+          description: "Block runs quoted above 200 credits.",
           descriptions: {
-            zh: "当 node quote 报价超过 200 积分（或请求指定 credit_ceiling）时阻止扣费运行。",
-            "zh-TW": "當 node quote 報價超過 200 積分（或請求指定 credit_ceiling）時阻止扣費執行。",
+            zh: "单次报价超过 200 点时自动拦截",
+            "zh-TW": "單次報價超過 200 點時自動攔截",
           },
           default: true,
           placement: "top",
@@ -257,6 +295,8 @@ export const DreaminaAuthPlugin = async (input = {}) => {
               callback: async (_code, cbOpts = {}) =>
                 finalizeProfileSignIn(profile, {
                   statusData: statusRes.data,
+                  initialCredits: inputs?.credits,
+                  directory,
                   signal: cbOpts?.signal ?? opts?.signal,
                 }),
             }
@@ -300,6 +340,8 @@ export const DreaminaAuthPlugin = async (input = {}) => {
                 callback: async (_code, cbOpts = {}) =>
                   finalizeProfileSignIn(profile, {
                     statusData: { ...data, ...data.state },
+                    initialCredits: inputs?.credits,
+                    directory,
                     signal: cbOpts?.signal ?? opts?.signal,
                   }),
               }
@@ -340,6 +382,8 @@ export const DreaminaAuthPlugin = async (input = {}) => {
                 }
                 return finalizeProfileSignIn(profile, {
                   statusData: { ...waitRes.data, ...waitRes.data.state },
+                  initialCredits: inputs?.credits,
+                  directory,
                   signal: waitSignal,
                 })
               },
@@ -403,7 +447,7 @@ export const DreaminaAuthPlugin = async (input = {}) => {
           : auth?.metadata && ("isVip" in auth.metadata || "vipLevel" in auth.metadata)
             ? { isVip: Boolean(auth.metadata.isVip), vipLevel: auth.metadata.vipLevel || "" }
             : null
-        const { plan, membershipDisplay } = formatVipStatus(acct)
+        const plan = formatVipStatus(acct)
         const user = acct?.userId != null ? `${profile} (${acct.userId})` : profile
         const stats = await getCreditStats(profile, { directory }).catch(() => ({
           todayCredits: 0,
@@ -411,26 +455,66 @@ export const DreaminaAuthPlugin = async (input = {}) => {
           lastQuotedCredits: null,
           lastSpentCredits: null,
           runCount: 0,
+          configuredBalance: null,
+          spentSinceBalanceSet: 0,
+          remainingCredits: null,
         }))
+        const liveBalance = extractLiveBalance(acct)
+        const envBalance = parseNonNegNumber(process.env.DREAMINA_CREDITS_BALANCE)
+        const configuredBalance = parseNonNegNumber(stats.configuredBalance)
+        const fallbackBalance = envBalance ?? configuredBalance
+
+        if (liveBalance !== null) {
+          return {
+            plan,
+            user,
+            balance: `剩余 ${liveBalance} 点`,
+            windows: [
+              {
+                name: "会员点数",
+                display: `剩余 ${liveBalance} 点 · 今日已用 ${stats.todayCredits} 点`,
+                aside: true,
+              },
+            ],
+            signIn: "kept",
+          }
+        }
+
+        if (fallbackBalance !== null && fallbackBalance > 0) {
+          const totalBalance = fallbackBalance
+          const used = envBalance !== null ? stats.todayCredits : (stats.spentSinceBalanceSet ?? 0)
+          const remaining = Math.max(0, totalBalance - used)
+          const usedPct = Math.min(100, Math.round((used / totalBalance) * 1000) / 10)
+          return {
+            plan,
+            user,
+            balance: `剩余 ${remaining} 点`,
+            windows: [
+              {
+                name: "会员点数",
+                used: usedPct,
+                amount: used,
+                limit: totalBalance,
+                unit: "credits",
+                display: `剩余 ${remaining} / ${totalBalance} 点 · 今日已用 ${stats.todayCredits} 点`,
+                aside: true,
+              },
+            ],
+            signIn: "kept",
+          }
+        }
+
         const guardLabel = resolveActiveGuardLabel(magpie)
-        const hasHistory = stats.totalCredits > 0 || stats.lastQuotedCredits !== null
-        const quoteSuffix = stats.lastQuotedCredits !== null ? ` · 最近报价 ${stats.lastQuotedCredits} 点` : ""
-        const creditsDisplay = hasHistory
-          ? `今日已用 ${stats.todayCredits} 点 · 累计 ${stats.totalCredits} 点${quoteSuffix}（${guardLabel}）`
-          : `今日已用 0 点 · ${guardLabel}（按次报价扣点）`
         return {
           plan,
           user,
-          ...(statusRes.data.expiresAt ? { until: statusRes.data.expiresAt } : {}),
           windows: [
             {
-              name: "会员状态",
-              display: membershipDisplay,
-              aside: true,
-            },
-            {
-              name: "点数 (积分)",
-              display: creditsDisplay,
+              name: "今日点数",
+              display:
+                stats.totalCredits > 0
+                  ? `已用 ${stats.todayCredits} 点 · 累计 ${stats.totalCredits} 点（${guardLabel}）`
+                  : `已用 0 点 · ${guardLabel}`,
               aside: true,
             },
           ],

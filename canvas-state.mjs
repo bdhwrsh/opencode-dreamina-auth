@@ -33,12 +33,13 @@ function localDateKey(d = new Date()) {
 }
 
 function finiteNonNeg(val, fallback = 0) {
+  if (val === null || val === undefined || (typeof val === "string" && val.trim() === "")) return fallback
   const n = Number(val)
   return Number.isFinite(n) && n >= 0 ? n : fallback
 }
 
 function nullableNonNeg(val) {
-  if (val === null || val === undefined) return null
+  if (val === null || val === undefined || (typeof val === "string" && val.trim() === "")) return null
   const n = Number(val)
   return Number.isFinite(n) && n >= 0 ? n : null
 }
@@ -88,6 +89,8 @@ function normalizeState(raw) {
           lastSpentCredits: nullableNonNeg(v.lastSpentCredits),
           lastRunAt: nullableNonNeg(v.lastRunAt),
           runCount: Math.trunc(finiteNonNeg(v.runCount, 0)),
+          configuredBalance: nullableNonNeg(v.configuredBalance),
+          spentSinceBalanceSet: finiteNonNeg(v.spentSinceBalanceSet, 0),
         }
       }
     }
@@ -278,7 +281,26 @@ function emptyCreditRecord(todayKey = localDateKey()) {
     lastSpentCredits: null,
     lastRunAt: null,
     runCount: 0,
+    configuredBalance: null,
+    spentSinceBalanceSet: 0,
   }
+}
+
+export async function setCreditBalance(profile = "default", { balance, directory } = {}) {
+  if (balance === null || balance === undefined || balance === "") return
+  if (typeof balance === "string" && balance.trim() === "") return
+  const val = Number(balance)
+  if (!Number.isFinite(val) || val < 0) return
+  const safeProfile = String(profile ?? "").trim() || "default"
+  await mutateCanvasState(directory, (state) => {
+    const todayKey = localDateKey()
+    const prev = Object.hasOwn(state.credits, safeProfile) ? state.credits[safeProfile] : emptyCreditRecord(todayKey)
+    state.credits[safeProfile] = {
+      ...prev,
+      configuredBalance: val,
+      spentSinceBalanceSet: 0,
+    }
+  })
 }
 
 export async function recordCreditQuote(profile = "default", { quotedCredits, directory } = {}) {
@@ -312,6 +334,7 @@ export async function recordCreditSpend(profile = "default", { credits, director
       todayDate: todayKey,
       todayCredits: prevToday + val,
       totalCredits: finiteNonNeg(prev.totalCredits, 0) + val,
+      spentSinceBalanceSet: finiteNonNeg(prev.spentSinceBalanceSet, 0) + val,
       lastSpentCredits: val,
       lastRunAt: Date.now(),
       runCount: Math.trunc(finiteNonNeg(prev.runCount, 0)) + 1,
@@ -330,14 +353,22 @@ export async function getCreditStats(profile = "default", { directory } = {}) {
       lastQuotedCredits: null,
       lastSpentCredits: null,
       runCount: 0,
+      configuredBalance: null,
+      spentSinceBalanceSet: 0,
+      remainingCredits: null,
     }
   }
   const todayKey = localDateKey()
+  const configuredBalance = nullableNonNeg(rec.configuredBalance)
+  const spentSinceBalanceSet = finiteNonNeg(rec.spentSinceBalanceSet, 0)
   return {
     todayCredits: rec.todayDate === todayKey ? finiteNonNeg(rec.todayCredits, 0) : 0,
     totalCredits: finiteNonNeg(rec.totalCredits, 0),
     lastQuotedCredits: nullableNonNeg(rec.lastQuotedCredits),
     lastSpentCredits: nullableNonNeg(rec.lastSpentCredits),
     runCount: Math.trunc(finiteNonNeg(rec.runCount, 0)),
+    configuredBalance,
+    spentSinceBalanceSet,
+    remainingCredits: configuredBalance !== null ? Math.max(0, configuredBalance - spentSinceBalanceSet) : null,
   }
 }
