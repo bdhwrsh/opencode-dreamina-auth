@@ -37,6 +37,11 @@
 1. **使用本机已有 CLI 配置（默认 `default`）**：输入 `dreamina-canvas` 的 profile 名称（留空默认 `default`），插件通过 `auth status` 与 `auth account` 校验登录态。
 2. **即梦浏览器登录**：可选填写 profile 名称（默认 `default`），插件调用 `auth login` 返回设备授权链接，并在后台通过 `auth wait --device-code` 等待授权完成。
 
+## 在 Agent 中使用（生图 / 生视频）
+
+1. **常规对话模型 + `magpie-image` MCP 工具（推荐）**：在 Magpie 的 `Settings → Models → Images / Video` 选择 `dreamina` 模型，并在 `Library → MCP servers` 中为目标 Agent 勾选 `magpie-image`，Agent 即可自动调用 `generate_image`、`generate_video` 与 `generation_result`。
+2. **直选即梦模型对话（默认先报价后确认）**：直接选择即梦模型发送提示词时，插件先创建草稿并调用 `node quote` 返回预估积分（0 扣费）；回复 `确认生成：<提示词>`（或带 `--confirm`）后才执行扣费生成。同时支持 Magpie「测试模型」（0 积分连通性检测）。
+
 ## 额度展示与积分防误扣费
 
 - **Logo 与菜单栏额度展示**：Magpie 供应商列表与菜单栏会展示官方产品 Logo、会员等级（来自 `auth account`）与点数状态。
