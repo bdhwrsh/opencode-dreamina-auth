@@ -1,0 +1,45 @@
+{
+  "name": "@magpie-community/opencode-dreamina-auth",
+  "version": "0.1.0",
+  "description": "Connect local dreamina-canvas CLI to Magpie for Dreamina (Jimeng) Seedream image and Seedance video generation.",
+  "type": "module",
+  "license": "MIT",
+  "main": "./opencode.mjs",
+  "exports": {
+    "./server": "./magpie.mjs",
+    ".": "./opencode2.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "opencode.mjs",
+    "magpie.mjs",
+    "opencode2.mjs",
+    "cli.mjs",
+    "models.mjs",
+    "canvas-state.mjs",
+    "media.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "bun test"
+  },
+  "keywords": [
+    "magpie",
+    "magpie-plugin",
+    "opencode",
+    "opencode-plugin",
+    "dreamina",
+    "jimeng",
+    "seedream",
+    "seedance"
+  ],
+  "magpie": {
+    "name": "Dreamina (即梦)",
+    "summary": {
+      "zh": "通过本机 dreamina-canvas CLI 接入即梦（Dreamina）：为 Magpie 提供 Seedream 生图与 Seedance / Vidu / Wan 生视频模型。",
+      "en": "Connect local dreamina-canvas CLI to Magpie for Dreamina (Jimeng) Seedream image and Seedance video generation."
+    },
+    "maxConcurrency": 4
+  }
+}
