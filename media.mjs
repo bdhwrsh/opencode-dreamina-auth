@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { pathToFileURL } from "node:url"
 import { ensureCanvas, getVideoTask, newNodeId, recordCreditQuote, recordCreditSpend, saveVideoTask } from "./canvas-state.mjs"
 import { CliError, hasCliRunnerForTests, isAbortError, isCliInstalled, redactSensitiveText, runCli } from "./cli.mjs"
-import { ModelParamError, fetchLiveModels, resolveImageParams, resolveVideoParams } from "./models.mjs"
+import { ModelParamError, fetchLiveModels, findModelSpec, resolveImageParams, resolveVideoParams } from "./models.mjs"
 
 export const DEFAULT_CREDIT_CEILING = 200
 
@@ -20,7 +21,7 @@ function jsonResponse(status, body, extraHeaders = {}) {
   })
 }
 
-export function errorResponse(status, message, { type, code, extra, headers } = {}) {
+export function errorResponse(status, message, { type, code, extra, headers, topLevelType } = {}) {
   const errType =
     type ??
     (status === 400
@@ -39,6 +40,7 @@ export function errorResponse(status, message, { type, code, extra, headers } = 
   return jsonResponse(
     status,
     {
+      ...(topLevelType ? { type: topLevelType } : {}),
       error: {
         message: redactSensitiveText(String(message || "Unknown Dreamina error")),
         type: errType,
@@ -50,19 +52,20 @@ export function errorResponse(status, message, { type, code, extra, headers } = 
   )
 }
 
-function errorToResponse(err) {
+function errorToResponse(err, { topLevelType } = {}) {
   if (isAbortError(err)) throw err
   if (err instanceof ModelParamError) {
-    return errorResponse(err.status, err.message, { code: err.code })
+    return errorResponse(err.status, err.message, { code: err.code, topLevelType })
   }
   if (err instanceof CliError) {
     return errorResponse(err.status, err.message, {
       code: err.code,
       headers: err.signIn ? { "X-Magpie-Sign-In": err.signIn } : undefined,
+      topLevelType,
     })
   }
   const status = Number.isInteger(err?.status) && err.status >= 400 && err.status < 600 ? err.status : 502
-  return errorResponse(status, err?.message || String(err), { code: err?.code })
+  return errorResponse(status, err?.message || String(err), { code: err?.code, topLevelType })
 }
 
 function headerValue(headers, name) {
@@ -464,7 +467,7 @@ function findDownloadedFile(tmpDir, dlData) {
   })
 }
 
-async function quoteConfirmAndRun(profile, projectId, nodeId, policy, { signal, directory }) {
+async function quoteNode(profile, projectId, nodeId, { signal, directory }) {
   const quoteRes = await runCli(
     profile,
     ["node", "quote", "--project-id", projectId, "--node-id", nodeId],
@@ -491,6 +494,11 @@ async function quoteConfirmAndRun(profile, projectId, nodeId, policy, { signal, 
   }
   const quotedCredits = Number(totalMaxCredits)
   await recordCreditQuote(profile, { quotedCredits, directory }).catch(() => {})
+  return quotedCredits
+}
+
+async function quoteConfirmAndRun(profile, projectId, nodeId, policy, { signal, directory }) {
+  const quotedCredits = await quoteNode(profile, projectId, nodeId, { signal, directory })
 
   if (policy.quoteOnly) {
     return {
@@ -563,6 +571,62 @@ async function quoteConfirmAndRun(profile, projectId, nodeId, policy, { signal, 
   }
 }
 
+function buildNodeCreateArgs(kind, projectId, nodeId, params, refTokens = []) {
+  const args = [
+    "node",
+    "create",
+    kind,
+    "--project-id",
+    projectId,
+    "--node-id",
+    nodeId,
+    "--title",
+    nodeTitleFromPrompt(params.prompt, kind === "video" ? "Magpie Video" : "Magpie Image"),
+    "--mode",
+    params.mode,
+    "--prompt",
+    escapePromptBraces(params.prompt),
+    "--model",
+    params.model,
+    "--ratio",
+    params.ratio,
+    "--resolution",
+    params.resolution,
+  ]
+  if (kind === "video") {
+    args.push("--duration", String(params.duration))
+  }
+  args.push("--count", String(params.count))
+  for (const ref of refTokens) args.push("--ref", ref)
+  return args
+}
+
+function saveOutputImage(filePath, nodeId, index, directory) {
+  const ext = path.extname(filePath) || ".png"
+  const filename = `${nodeId}-${index + 1}${ext}`
+  const bases = []
+  if (typeof directory === "string" && directory.trim()) {
+    bases.push(path.join(path.resolve(directory), "dreamina-outputs"))
+  }
+  bases.push(path.join(os.tmpdir(), "dreamina-outputs"))
+
+  let lastErr = null
+  for (const dir of bases) {
+    try {
+      fs.mkdirSync(dir, { recursive: true })
+      const dest = path.join(dir, filename)
+      fs.copyFileSync(filePath, dest)
+      try {
+        fs.chmodSync(dest, 0o600)
+      } catch {}
+      return { url: pathToFileURL(dest).href, path: dest }
+    } catch (err) {
+      lastErr = err
+    }
+  }
+  throw lastErr ?? new Error("Unable to persist Dreamina output image.")
+}
+
 function extractSucceededResources(opData) {
   const resources = Array.isArray(opData?.resources) ? opData.resources : []
   const topSucceeded = isSucceededState(opData?.state)
@@ -587,32 +651,7 @@ async function handleImageRequest(req, { profile, directory, getOption, signal, 
   const refTokens = await uploadRefItems(profile, projectId, refInputs, { signal })
 
   const nodeId = newNodeId()
-  const createArgs = [
-    "node",
-    "create",
-    "image",
-    "--project-id",
-    projectId,
-    "--node-id",
-    nodeId,
-    "--title",
-    nodeTitleFromPrompt(params.prompt, "Magpie Image"),
-    "--mode",
-    params.mode,
-    "--prompt",
-    escapePromptBraces(params.prompt),
-    "--model",
-    params.model,
-    "--ratio",
-    params.ratio,
-    "--resolution",
-    params.resolution,
-    "--count",
-    String(params.count),
-  ]
-  for (const ref of refTokens) {
-    createArgs.push("--ref", ref)
-  }
+  const createArgs = buildNodeCreateArgs("image", projectId, nodeId, params, refTokens)
 
   await runCli(profile, createArgs, { signal })
 
@@ -668,6 +707,7 @@ async function handleImageRequest(req, { profile, directory, getOption, signal, 
   }
   await recordCreditSpend(profile, { credits: spentCredits, directory }).catch(() => {})
 
+  const wantUrl = String(req.response_format || "").trim().toLowerCase() === "url"
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dreamina-img-"))
   try {
     const data = []
@@ -681,8 +721,16 @@ async function handleImageRequest(req, { profile, directory, getOption, signal, 
         { signal },
       )
       const filePath = findDownloadedFile(outDir, dlRes.data)
-      const b64_json = fs.readFileSync(filePath).toString("base64")
-      data.push({ b64_json })
+      if (wantUrl) {
+        if (typeof dlRes.data?.url === "string" && dlRes.data.url.trim()) {
+          data.push({ url: dlRes.data.url.trim() })
+        } else {
+          data.push(saveOutputImage(filePath, nodeId, i, directory))
+        }
+      } else {
+        const b64_json = fs.readFileSync(filePath).toString("base64")
+        data.push({ b64_json })
+      }
     }
     return jsonResponse(200, {
       created: Math.floor(Date.now() / 1000),
@@ -705,34 +753,7 @@ async function handleVideoCreate(req, { profile, directory, getOption, signal })
   const refTokens = await uploadRefItems(profile, projectId, refInputs, { signal })
 
   const nodeId = newNodeId()
-  const createArgs = [
-    "node",
-    "create",
-    "video",
-    "--project-id",
-    projectId,
-    "--node-id",
-    nodeId,
-    "--title",
-    nodeTitleFromPrompt(params.prompt, "Magpie Video"),
-    "--mode",
-    params.mode,
-    "--prompt",
-    escapePromptBraces(params.prompt),
-    "--model",
-    params.model,
-    "--ratio",
-    params.ratio,
-    "--resolution",
-    params.resolution,
-    "--duration",
-    String(params.duration),
-    "--count",
-    String(params.count),
-  ]
-  for (const ref of refTokens) {
-    createArgs.push("--ref", ref)
-  }
+  const createArgs = buildNodeCreateArgs("video", projectId, nodeId, params, refTokens)
 
   await runCli(profile, createArgs, { signal })
 
@@ -871,9 +892,294 @@ async function handleVideoContent(videoId, { directory, signal }) {
   }
 }
 
+function sseResponse(bodyText) {
+  return new Response(bodyText, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache",
+    },
+  })
+}
+
+function chatCompletionResponse({ model, text, stream = false }) {
+  const id = `chatcmpl_${randomUUID().replace(/-/g, "")}`
+  const created = Math.floor(Date.now() / 1000)
+  const usage = { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+
+  if (!stream) {
+    return jsonResponse(200, {
+      id,
+      object: "chat.completion",
+      created,
+      model,
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: text },
+          finish_reason: "stop",
+        },
+      ],
+      usage,
+    })
+  }
+
+  const chunk = (delta, finish_reason, includeUsage = false) =>
+    `data: ${JSON.stringify({
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [{ index: 0, delta, finish_reason }],
+      ...(includeUsage ? { usage } : {}),
+    })}\n\n`
+
+  return sseResponse(
+    chunk({ role: "assistant", content: "" }, null) +
+      chunk({ content: text }, null) +
+      chunk({}, "stop", true) +
+      "data: [DONE]\n\n",
+  )
+}
+
+function anthropicMessageResponse({ model, text, stream = false }) {
+  const id = `msg_${randomUUID().replace(/-/g, "")}`
+  if (!stream) {
+    return jsonResponse(200, {
+      id,
+      type: "message",
+      role: "assistant",
+      model,
+      content: [{ type: "text", text }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    })
+  }
+
+  const evt = (type, payload) => `event: ${type}\ndata: ${JSON.stringify({ type, ...payload })}\n\n`
+  return sseResponse(
+    evt("message_start", {
+      message: {
+        id,
+        type: "message",
+        role: "assistant",
+        model,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 0 },
+      },
+    }) +
+      evt("content_block_start", { index: 0, content_block: { type: "text", text: "" } }) +
+      evt("content_block_delta", { index: 0, delta: { type: "text_delta", text } }) +
+      evt("content_block_stop", { index: 0 }) +
+      evt("message_delta", { delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } }) +
+      evt("message_stop", {}),
+  )
+}
+
+function sendChatProtocolResponse({ protocol, model, text, stream }) {
+  return protocol === "anthropic"
+    ? anthropicMessageResponse({ model, text, stream })
+    : chatCompletionResponse({ model, text, stream })
+}
+
+function extractTextBlocks(content) {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+  const parts = []
+  for (const block of content) {
+    if (typeof block === "string") {
+      parts.push(block)
+    } else if (block && typeof block === "object") {
+      if (typeof block.text === "string") parts.push(block.text)
+      else if (block.type === "text" && typeof block.content === "string") parts.push(block.content)
+    }
+  }
+  return parts.join("\n")
+}
+
+function formatQuoteReply({ spec, quotedCredits, nodeId, cleanPrompt, quoteOnly }) {
+  const quoteNote = quoteOnly ? "（插件当前已开启「仅报价（不扣积分）」，暂不可确认扣费）" : "（仅询价未扣费）"
+  const lines = [
+    `- 模型：${spec.name} (\`${spec.id}\`)`,
+    `- 报价：预估消耗 **${quotedCredits} 积分**${quoteNote}，草稿节点 \`${nodeId}\``,
+    `- 操作方式：`,
+  ]
+  if (!quoteOnly) {
+    lines.push(`  1. 在当前对话直接确认生成：回复 \`确认生成：${cleanPrompt}\``)
+  }
+  lines.push(
+    `  ${quoteOnly ? "1" : "2"}. 在 Agent 中自动调用：将右下角主对话模型切回常规文本模型（如 Claude / GPT），直接让 Agent 调用 Magpie 的 \`generate_video\` / \`generate_image\` 工具。`,
+  )
+  return lines.join("\n")
+}
+
+function extractChatContext(payload) {
+  const rawModel = String(payload?.model || "seedream_5.5").replace(/^dreamina\//i, "").trim()
+  const echoModel = String(payload?.model || rawModel || "seedream_5.5")
+  const stream = Boolean(payload?.stream)
+  const maxTokens = Number(payload?.max_tokens ?? payload?.max_completion_tokens ?? 0)
+  const messages = Array.isArray(payload?.messages) ? payload.messages : []
+
+  const systemParts = [extractTextBlocks(payload?.system)]
+  for (const msg of messages) {
+    if (msg?.role === "system" || msg?.role === "developer") {
+      systemParts.push(extractTextBlocks(msg.content))
+    }
+  }
+  const systemText = systemParts.filter(Boolean).join("\n")
+
+  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null
+  const hasToolResult =
+    Array.isArray(lastMessage?.content) && lastMessage.content.some((block) => block?.type === "tool_result")
+  const rawUserText = lastMessage ? extractTextBlocks(lastMessage.content) : ""
+  const userText = rawUserText.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "").trim()
+
+  const probePattern =
+    /isNewTopic|is_new_topic|generate a.*title|write a.*title|concise title|summarize this conversation|extract.*filepath|command prefix|connection_check|warmup|quota/i
+  const greetingPattern = /^(hi|hello|hey|ping|test|ok|1|1\+1=?|respond with ok|say ok|你好|测试)[.!?\s]*$/i
+
+  const isProbe =
+    (Number.isFinite(maxTokens) && maxTokens > 0 && maxTokens <= 64) ||
+    probePattern.test(systemText) ||
+    probePattern.test(rawUserText) ||
+    !lastMessage ||
+    lastMessage.role !== "user" ||
+    hasToolResult ||
+    !userText ||
+    greetingPattern.test(userText)
+
+  const isTopicProbe = /isNewTopic|is_new_topic/i.test(systemText) || /isNewTopic|is_new_topic/i.test(rawUserText)
+  return { rawModel, echoModel, stream, userText, isProbe, isTopicProbe }
+}
+
+async function handleChatRequest(payload, { protocol, profile, directory, getOption, signal }) {
+  const statusRes = await runCli(profile, ["auth", "status"], {
+    signal,
+    timeoutMs: 15_000,
+    check: false,
+  })
+  if (!statusRes.ok || !statusRes.data?.loggedIn) {
+    return errorResponse(
+      401,
+      statusRes.error?.message || `Dreamina profile "${profile}" is not signed in. Please sign in again.`,
+      {
+        code: "authentication_error",
+        headers: { "X-Magpie-Sign-In": "expired" },
+        topLevelType: protocol === "anthropic" ? "error" : undefined,
+      },
+    )
+  }
+
+  const { rawModel, echoModel, stream, userText, isProbe, isTopicProbe } = extractChatContext(payload)
+  if (isProbe) {
+    const replyText = isTopicProbe ? JSON.stringify({ isNewTopic: false, title: "即梦生成" }) : "OK"
+    return sendChatProtocolResponse({ protocol, model: echoModel, text: replyText, stream })
+  }
+
+  const hasPrefixConfirm = /^(?:确认生成|confirm\b)\s*[:：]?\s*/i.test(userText)
+  const hasFlagConfirm = /(?:^|\s)--confirm(?=\s|$)/i.test(userText)
+  const confirmed = hasPrefixConfirm || hasFlagConfirm
+  let cleanPrompt = userText
+  if (hasPrefixConfirm) {
+    cleanPrompt = cleanPrompt.replace(/^(?:确认生成|confirm\b)\s*[:：]?\s*/i, "")
+  }
+  if (hasFlagConfirm) {
+    cleanPrompt = cleanPrompt.replace(/(?:^|\s)--confirm(?=\s|$)/gi, " ")
+  }
+  cleanPrompt = cleanPrompt.trim()
+
+  if (!cleanPrompt) {
+    return sendChatProtocolResponse({
+      protocol,
+      model: echoModel,
+      text: "请提供生成描述词，例如：`确认生成：一只在雨夜霓虹街头行走的橘猫`。",
+      stream,
+    })
+  }
+
+  const specs = await fetchLiveModels(profile, { signal }).catch(() => null)
+  const spec = findModelSpec(rawModel, null, specs)
+  if (!spec) {
+    throw new ModelParamError(`Unknown or unsupported Dreamina model: ${rawModel || "(empty)"}`)
+  }
+
+  const policy = resolveCreditPolicy(payload, getOption)
+
+  if (!confirmed || policy.quoteOnly) {
+    const projectId = await ensureCanvas(profile, { directory, signal })
+    const nodeId = newNodeId()
+    const createArgs =
+      spec.type === "video"
+        ? buildNodeCreateArgs("video", projectId, nodeId, resolveVideoParams(spec.id, { prompt: cleanPrompt }, 0, { catalog: specs }))
+        : buildNodeCreateArgs("image", projectId, nodeId, resolveImageParams(spec.id, { prompt: cleanPrompt }, 0, { catalog: specs }))
+
+    await runCli(profile, createArgs, { signal })
+    const quotedCredits = await quoteNode(profile, projectId, nodeId, { signal, directory })
+    const replyText = formatQuoteReply({
+      spec,
+      quotedCredits,
+      nodeId,
+      cleanPrompt,
+      quoteOnly: policy.quoteOnly,
+    })
+    return sendChatProtocolResponse({ protocol, model: echoModel, text: replyText, stream })
+  }
+
+  if (spec.type === "video") {
+    const vidRes = await handleVideoCreate({ model: spec.id, prompt: cleanPrompt }, { profile, directory, getOption, signal })
+    const data = await vidRes.json().catch(() => ({}))
+    if (!vidRes.ok) {
+      return sendChatProtocolResponse({
+        protocol,
+        model: echoModel,
+        text: `生成已拦截或失败：${data?.error?.message || `HTTP ${vidRes.status}`}`,
+        stream,
+      })
+    }
+    const task = getVideoTask(directory, data.id)
+    const replyText = [
+      `已提交即梦视频生成任务：`,
+      `- 模型：${spec.name} (\`${spec.id}\`)`,
+      `- 任务 ID：\`${data.id}\``,
+      `- 状态：${data.status || "queued"}（时长 ${data.seconds ?? spec.defaultDuration} 秒${data.size ? `，规格 ${data.size}` : ""}）`,
+      ...(task?.projectId ? [`- 画布项目：\`${task.projectId}\``] : []),
+    ].join("\n")
+    return sendChatProtocolResponse({ protocol, model: echoModel, text: replyText, stream })
+  }
+
+  const imgRes = await handleImageRequest(
+    { model: spec.id, prompt: cleanPrompt, response_format: "url" },
+    { profile, directory, getOption, signal, forceEdit: false },
+  )
+  const data = await imgRes.json().catch(() => ({}))
+  if (!imgRes.ok) {
+    return sendChatProtocolResponse({
+      protocol,
+      model: echoModel,
+      text: `生成已拦截或失败：${data?.error?.message || `HTTP ${imgRes.status}`}`,
+      stream,
+    })
+  }
+  const items = Array.isArray(data?.data) ? data.data : []
+  const lines = [`已完成即梦图片生成（${spec.name}）：`]
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]
+    if (item?.url) {
+      lines.push(`- [图片 ${i + 1}](${item.url})${item.path ? `（\`${item.path}\`）` : ""}`)
+    } else if (item?.b64_json) {
+      lines.push(`- 图片 ${i + 1}：已生成（base64 数据）`)
+    }
+  }
+  return sendChatProtocolResponse({ protocol, model: echoModel, text: lines.join("\n"), stream })
+}
+
 export function createMediaFetch({ profile = "default", getProfile, directory, getOption } = {}) {
   return async (input, init = {}) => {
     let signal
+    let topLevelType
     try {
       const rawReq = await readRawRequest(input, init)
       signal = rawReq.signal
@@ -881,15 +1187,30 @@ export function createMediaFetch({ profile = "default", getProfile, directory, g
         throw new DOMException("Aborted", "AbortError")
       }
 
-      if (!hasCliRunnerForTests() && !isCliInstalled()) {
-        return errorResponse(503, "dreamina-canvas CLI not found on this machine. Install it or set DREAMINA_CANVAS_BIN.", {
-          code: "cli_not_found",
-        })
-      }
-
       const activeProfile = (typeof getProfile === "function" ? await getProfile() : profile) || "default"
       const parsedUrl = new URL(rawReq.url || "/", "http://dreamina.local")
       const pathname = parsedUrl.pathname
+      const isAnthropicChat = rawReq.method === "POST" && /(?:^|\/)messages$/i.test(pathname)
+      const isOpenAiChat = rawReq.method === "POST" && /(?:^|\/)chat\/completions$/i.test(pathname)
+      if (isAnthropicChat) topLevelType = "error"
+
+      if (!hasCliRunnerForTests() && !isCliInstalled()) {
+        return errorResponse(503, "dreamina-canvas CLI not found on this machine. Install it or set DREAMINA_CANVAS_BIN.", {
+          code: "cli_not_found",
+          topLevelType,
+        })
+      }
+
+      if (isOpenAiChat || isAnthropicChat) {
+        const payload = await parseRequestPayload(rawReq)
+        return await handleChatRequest(payload, {
+          protocol: isAnthropicChat ? "anthropic" : "openai",
+          profile: activeProfile,
+          directory,
+          getOption,
+          signal,
+        })
+      }
 
       if (rawReq.method === "POST" && /(?:^|\/)images\/generations$/i.test(pathname)) {
         const payload = await parseRequestPayload(rawReq)
@@ -922,7 +1243,7 @@ export function createMediaFetch({ profile = "default", getProfile, directory, g
         code: "unsupported_route",
       })
     } catch (err) {
-      return errorToResponse(err)
+      return errorToResponse(err, { topLevelType })
     }
   }
 }

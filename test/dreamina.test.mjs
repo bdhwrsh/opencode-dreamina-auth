@@ -411,6 +411,9 @@ describe("media.mjs routes, quote_only, credit_guard, and video polling", () => 
         }
       }
       const cmd = args.slice(0, 2).join(" ")
+      if (cmd === "auth status") {
+        return { ok: true, data: { loggedIn: true, expiresAt: "2026-12-31T00:00:00Z", region: "cn", profile } }
+      }
       if (cmd === "model list") {
         return { exitCode: 1, stdout: "", stderr: "" } // trigger static fallback
       }
@@ -771,6 +774,131 @@ describe("media.mjs routes, quote_only, credit_guard, and video polling", () => 
     expect(res.status).toBe(401)
     expect(res.headers.get("x-magpie-sign-in")).toBe("expired")
   })
+
+  it("handles POST /chat/completions and POST /messages probes, quote-first chat prompts, and confirmed runs", async () => {
+    const mock = buildGatewayMock({ quoteCredits: 18 })
+    setCliRunnerForTests(mock.fn)
+    const hooks = await DreaminaAuthPlugin({ directory: tmpDir })
+    const loaded = await hooks.auth.loader(async () => ({ type: "oauth", metadata: { profile: "default" } }))
+
+    // 1) OpenAI non-streaming probe -> 200 JSON, 0 node create calls
+    const openAiProbe = await loaded.fetch("dreamina://local/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "high_aes_general_v50_flash",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+    expect(openAiProbe.status).toBe(200)
+    const openAiJson = await openAiProbe.json()
+    expect(openAiJson.object).toBe("chat.completion")
+    expect(openAiJson.choices[0].message.content).toBe("OK")
+
+    // 2) OpenAI streaming probe
+    const openAiStream = await loaded.fetch("dreamina://local/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "seedream_5.5",
+        stream: true,
+        max_tokens: 16,
+        messages: [{ role: "user", content: "ping" }],
+      }),
+    })
+    expect(openAiStream.status).toBe(200)
+    expect(openAiStream.headers.get("content-type")).toContain("text/event-stream")
+    const openAiSse = await openAiStream.text()
+    expect(openAiSse).toContain('"content":"OK"')
+    expect(openAiSse).toContain("data: [DONE]")
+
+    // 3) Anthropic non-streaming + streaming probes + isNewTopic probe
+    const anthProbe = await loaded.fetch("dreamina://local/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "seedance_2.0_mini",
+        max_tokens: 32,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+    expect(anthProbe.status).toBe(200)
+    const anthJson = await anthProbe.json()
+    expect(anthJson.type).toBe("message")
+    expect(anthJson.content[0].text).toBe("OK")
+
+    const anthTopic = await loaded.fetch("dreamina://local/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "seedance_2.0_mini",
+        stream: true,
+        max_tokens: 128,
+        system: "Analyze if this message asks isNewTopic and extract title",
+        messages: [{ role: "user", content: "随机生成一段视频" }],
+      }),
+    })
+    expect(anthTopic.status).toBe(200)
+    const anthTopicSse = await anthTopic.text()
+    expect(anthTopicSse).toContain("event: message_start")
+    expect(anthTopicSse).toContain("isNewTopic")
+    expect(anthTopicSse).toContain("event: message_stop")
+
+    // Zero node create / confirm calls for all probes above
+    expect(mock.recorded.some((c) => c.args[0] === "node")).toBe(false)
+
+    // 4) Real video prompt without confirm -> quote only, no node confirm/run
+    const quoteTurn = await loaded.fetch("dreamina://local/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "dreamina/seedance_2.0_mini",
+        max_tokens: 4096,
+        messages: [{ role: "user", content: "<system-reminder>ignored</system-reminder>\n随机生成一段视频" }],
+      }),
+    })
+    expect(quoteTurn.status).toBe(200)
+    const quoteTurnBody = await quoteTurn.json()
+    expect(quoteTurnBody.content[0].text).toContain("18 积分")
+    expect(quoteTurnBody.content[0].text).toContain("确认生成：随机生成一段视频")
+    expect(mock.recorded.some((c) => c.args[0] === "node" && c.args[1] === "create")).toBe(true)
+    expect(mock.recorded.some((c) => c.args[0] === "node" && c.args[1] === "quote")).toBe(true)
+    expect(mock.confirmed).toBe(false)
+    expect(mock.ran).toBe(false)
+
+    // 5) Confirmed video prompt -> runs confirm + run and returns video task ID
+    const confirmVideo = await loaded.fetch("dreamina://local/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "seedance_2.0_mini",
+        max_tokens: 4096,
+        stream: true,
+        messages: [{ role: "user", content: "确认生成：随机生成一段视频" }],
+      }),
+    })
+    expect(confirmVideo.status).toBe(200)
+    const confirmVideoSse = await confirmVideo.text()
+    expect(confirmVideoSse).toContain("video_")
+    expect(confirmVideoSse).toContain("已提交即梦视频生成任务")
+    expect(mock.confirmed).toBe(true)
+    expect(mock.ran).toBe(true)
+
+    // 6) Confirmed image prompt -> persists file and returns link
+    const confirmImg = await loaded.fetch("dreamina://local/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "seedream_5.5",
+        max_tokens: 4096,
+        messages: [{ role: "user", content: "确认生成：雪山日出" }],
+      }),
+    })
+    expect(confirmImg.status).toBe(200)
+    const confirmImgJson = await confirmImg.json()
+    expect(confirmImgJson.choices[0].message.content).toContain("file://")
+  })
 })
 
 describe("index.mjs auth methods, refresh, usage, and provider.models", () => {
@@ -863,7 +991,6 @@ describe("index.mjs auth methods, refresh, usage, and provider.models", () => {
           "zh-TW": "只詢價並回傳預估點數，不執行生成",
         },
         default: false,
-        placement: "top",
       },
       {
         key: "credit_guard",
@@ -875,7 +1002,6 @@ describe("index.mjs auth methods, refresh, usage, and provider.models", () => {
           "zh-TW": "單次報價超過 200 點時自動攔截",
         },
         default: true,
-        placement: "top",
       },
     ])
     expect(hooks.auth.methods[0].prompts.map((p) => p.key)).toEqual(["profile", "credits"])

@@ -241,7 +241,6 @@ export const DreaminaAuthPlugin = async (input = {}) => {
             "zh-TW": "只詢價並回傳預估點數，不執行生成",
           },
           default: false,
-          placement: "top",
         },
         {
           key: "credit_guard",
@@ -253,7 +252,6 @@ export const DreaminaAuthPlugin = async (input = {}) => {
             "zh-TW": "單次報價超過 200 點時自動攔截",
           },
           default: true,
-          placement: "top",
         },
       ],
       methods: [
