@@ -225,14 +225,43 @@ function collectRefInputs(req) {
   const items = []
   const first = req.first_frame ?? req.first_frame_image
   const last = req.last_frame ?? req.last_frame_image
-  if (first != null) items.push(first)
-  if (last != null) items.push(last)
+  if (first != null && first !== "") items.push(first)
+  if (last != null && last !== "") items.push(last)
   for (const key of ["input_reference", "image", "images", "reference_images", "refs"]) {
     for (const entry of normalizeRefInputList(req[key])) {
       if (entry != null && entry !== "") items.push(entry)
     }
   }
   return items
+}
+
+export function escapePromptBraces(prompt) {
+  const s = String(prompt ?? "")
+  if (!s.includes("{{")) return s
+  let out = ""
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "{" && s[i + 1] === "{") {
+      let backslashes = 0
+      for (let j = i - 1; j >= 0 && s[j] === "\\"; j--) backslashes++
+      const alreadyEscaped = backslashes % 2 === 1
+      const validRef = !alreadyEscaped && /^\{\{(?:node|res|uri|vid):[^{}\s]+\}\}/.test(s.slice(i))
+      if (!alreadyEscaped && !validRef) {
+        out += "\\{{"
+      } else {
+        out += "{{"
+      }
+      i++
+    } else {
+      out += s[i]
+    }
+  }
+  return out
+}
+
+function nodeTitleFromPrompt(prompt, fallback) {
+  const normalized = String(prompt ?? "").replace(/\s+/g, " ").trim()
+  if (!normalized) return fallback
+  return Array.from(normalized).slice(0, 80).join("")
 }
 
 function parseDataUrl(value) {
@@ -366,9 +395,7 @@ function parseCeilingValue(raw) {
 }
 
 function resolveCreditPolicy(req, getOption) {
-  const quoteOnly = req.quote_only !== undefined
-    ? parseBoolOption(req.quote_only, false)
-    : Boolean(getOption?.("quote_only") === true)
+  const quoteOnly = Boolean(getOption?.("quote_only") === true) || parseBoolOption(req.quote_only, false)
 
   const explicitCeiling = parseCeilingValue(req.credit_ceiling)
   if (explicitCeiling !== undefined) {
@@ -567,10 +594,12 @@ async function handleImageRequest(req, { profile, directory, getOption, signal, 
     projectId,
     "--node-id",
     nodeId,
+    "--title",
+    nodeTitleFromPrompt(params.prompt, "Magpie Image"),
     "--mode",
     params.mode,
     "--prompt",
-    params.prompt,
+    escapePromptBraces(params.prompt),
     "--model",
     params.model,
     "--ratio",
@@ -580,9 +609,6 @@ async function handleImageRequest(req, { profile, directory, getOption, signal, 
     "--count",
     String(params.count),
   ]
-  if (!params.prompt.trim()) {
-    createArgs.push("--title", "Magpie Image")
-  }
   for (const ref of refTokens) {
     createArgs.push("--ref", ref)
   }
@@ -667,10 +693,12 @@ async function handleVideoCreate(req, { profile, directory, getOption, signal })
     projectId,
     "--node-id",
     nodeId,
+    "--title",
+    nodeTitleFromPrompt(params.prompt, "Magpie Video"),
     "--mode",
     params.mode,
     "--prompt",
-    params.prompt,
+    escapePromptBraces(params.prompt),
     "--model",
     params.model,
     "--ratio",
@@ -682,9 +710,6 @@ async function handleVideoCreate(req, { profile, directory, getOption, signal })
     "--count",
     String(params.count),
   ]
-  if (!params.prompt.trim()) {
-    createArgs.push("--title", "Magpie Video")
-  }
   for (const ref of refTokens) {
     createArgs.push("--ref", ref)
   }
@@ -789,7 +814,12 @@ async function handleVideoContent(videoId, { directory, signal }) {
     })
   }
   const okResources = extractSucceededResources(opData)
-  if (status !== "completed" || !okResources.length) {
+  if (status === "completed" && !okResources.length) {
+    return errorResponse(502, "Dreamina video operation completed without a succeeded video resource.", {
+      code: "empty_output",
+    })
+  }
+  if (status !== "completed") {
     return errorResponse(409, `Dreamina video ${task.videoTaskId} is not completed yet (status=${status}).`, {
       code: "video_not_ready",
     })

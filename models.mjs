@@ -131,7 +131,7 @@ function parseCliModelItem(item, typeOverride) {
   const modes = {}
   let minDuration = Infinity
   let maxDuration = -Infinity
-  let maxBatchCount = 1
+  let maxBatchCount = 0
 
   for (const m of rawModes) {
     const modeName = String(m?.name || "").trim()

@@ -18,6 +18,7 @@ import {
   resolveImageParams,
   resolveVideoParams,
 } from "../models.mjs"
+import { escapePromptBraces } from "../media.mjs"
 
 const SECRET_TOKEN = "mock-secret-credit-confirmation-token-xyz"
 const SECRET_TEMP_URL = "https://cdn.example.invalid/temp-file?Signature=secretSig123&Expires=999999"
@@ -290,6 +291,7 @@ describe("models.mjs", () => {
     expect(live[LIVE_META].live).toBe(true)
     expect(live[LIVE_META].fellBack).toBe(false)
     expect(live["wan_3.0"].modes.first_last_frame).toEqual({ minRefs: 1, maxRefs: 2 })
+    expect(live["wan_3.0"].maxBatchCount).toBe(4)
 
     setCliRunnerForTests(async () => ({ exitCode: 1, stdout: "", stderr: "cli error" }))
     const fallback = await fetchLiveModels("default", { fresh: true })
@@ -478,7 +480,7 @@ describe("media.mjs routes, quote_only, credit_guard, and video polling", () => 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: "seedream_5.5",
-        prompt: "a futuristic mountain studio",
+        prompt: "a futuristic {{studio}} with {{res:11111111-1111-4111-8111-111111111111}}",
         size: "1792x1024",
       }),
     })
@@ -486,6 +488,16 @@ describe("media.mjs routes, quote_only, credit_guard, and video polling", () => 
     const body = await res.json()
     expect(body.data.length).toBe(1)
     expect(body.data[0].b64_json).toBe(mock.imgBytes.toString("base64"))
+
+    // Verify --title is always passed even on non-empty prompts and literal {{ is escaped
+    const t2iCall = mock.recorded.find((c) => c.args[0] === "node" && c.args[1] === "create")
+    expect(t2iCall.args).toContain("--title")
+    const titleVal = t2iCall.args[t2iCall.args.indexOf("--title") + 1]
+    expect(titleVal.length).toBeGreaterThan(0)
+    const promptVal = t2iCall.args[t2iCall.args.indexOf("--prompt") + 1]
+    expect(promptVal).toBe("a futuristic \\{{studio}} with {{res:11111111-1111-4111-8111-111111111111}}")
+
+    expect(escapePromptBraces("already \\{{escaped}} and {{unclosed")).toBe("already \\{{escaped}} and \\{{unclosed")
 
     // Verify no secret token leaked into state file
     const stateText = fs.readFileSync(resolveStatePath(tmpDir), "utf8")
@@ -581,6 +593,16 @@ describe("media.mjs routes, quote_only, credit_guard, and video polling", () => 
     expect(mockQuoteOnly.confirmed).toBe(false)
     expect(mockQuoteOnly.ran).toBe(false)
 
+    // Request quote_only: false must NOT bypass UI quote_only: true safety lock
+    const resBypass = await loaded.fetch("dreamina://local/images/generations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "seedream_5.5", prompt: "try bypass", quote_only: false }),
+    })
+    expect(resBypass.status).toBe(403)
+    expect(mockQuoteOnly.confirmed).toBe(false)
+    expect(mockQuoteOnly.ran).toBe(false)
+
     // Test credit_ceiling (default 200) exceeded
     quoteOnlyOpt = false
     const mockExpensive = buildGatewayMock({ quoteCredits: 250 })
@@ -656,10 +678,27 @@ describe("media.mjs routes, quote_only, credit_guard, and video polling", () => 
     expect(videoObj.status).toBe("queued")
     expect(videoObj.seconds).toBe("8")
 
-    // Ensure uppercase 720P was passed to wan_3.0
+    // Ensure uppercase 720P and --title were passed to wan_3.0
     const createCall = mock.recorded.find((c) => c.args[0] === "node" && c.args[1] === "create")
     expect(createCall.args).toContain("720P")
     expect(createCall.args).toContain("first_last_frame")
+    expect(createCall.args).toContain("--title")
+
+    // Empty string first_frame/last_frame must be ignored cleanly (falls back to t2v)
+    const t2vRes = await loaded.fetch("dreamina://local/videos", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "seedance_2.5",
+        prompt: "pure {{text}} video",
+        first_frame: "",
+        last_frame: "",
+      }),
+    })
+    expect(t2vRes.status).toBe(200)
+    const t2vCall = mock.recorded.filter((c) => c.args[0] === "node" && c.args[1] === "create").at(-1)
+    expect(t2vCall.args).toContain("t2v")
+    expect(t2vCall.args[t2vCall.args.indexOf("--prompt") + 1]).toBe("pure \\{{text}} video")
 
     // While running -> status in_progress, /content returns 409
     const poll1 = await loaded.fetch(`dreamina://local/videos/${videoObj.id}`, { method: "GET" })
@@ -683,6 +722,12 @@ describe("media.mjs routes, quote_only, credit_guard, and video polling", () => 
     // Missing video ID -> 404
     const missing = await loaded.fetch("dreamina://local/videos/video_does_not_exist", { method: "GET" })
     expect(missing.status).toBe(404)
+
+    // Completed operation with empty resources -> 502 empty_output
+    setCliRunnerForTests(async () => ({ ok: true, data: { state: "succeeded", resources: [] } }))
+    const emptyContent = await loaded.fetch(`dreamina://local/videos/${videoObj.id}/content`, { method: "GET" })
+    expect(emptyContent.status).toBe(502)
+    expect((await emptyContent.json()).error.code).toBe("empty_output")
   })
 
   it("propagates 401 X-Magpie-Sign-In: expired on auth errors", async () => {
